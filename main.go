@@ -60,6 +60,8 @@ func main() {
 		index    int
 		selector string
 		isThumb  bool
+		isOther  bool
+		s        string
 	}
 	tasks := make(chan downloadTask, 100)
 	var wg sync.WaitGroup
@@ -69,10 +71,19 @@ func main() {
 	for i := 0; i < numWorkers; i++ {
 		go func() {
 			for task := range tasks {
-				if err := tilesDownloader(task.tileType, task.index, task.selector, saveDir, task.isThumb); err != nil {
-					logrus.Error(errors.Wrap(err, "tilesDownloader"))
+				if task.isOther {
+					if err := otherTilesDownloader(task.s, task.selector, saveDir, task.isThumb); err != nil {
+						logrus.Error(errors.Wrap(err, "otherTilesDownloader"))
+					}
+					wg.Done()
+
+				} else {
+					if err := tilesDownloader(task.tileType, task.index, task.selector, saveDir, task.isThumb); err != nil {
+						logrus.Error(errors.Wrap(err, "tilesDownloader"))
+					}
+					wg.Done()
+
 				}
-				wg.Done()
 			}
 		}()
 	}
@@ -80,9 +91,15 @@ func main() {
 	// Send tasks to workers
 	for t := range validTilesTypes {
 		for i := tilesIndexStart[t]; i <= tilesIndexEnd[t]; i++ {
-			for s, isThumb := range selectorsThumb {
+			for sel, isThumb := range selectorsThumb {
 				wg.Add(1)
-				tasks <- downloadTask{t, i, s, isThumb}
+				tasks <- downloadTask{t, i, sel, isThumb, false, nullStr}
+			}
+		}
+		for _, s := range otherTiles {
+			for sel, isThumb := range selectorsThumb {
+				wg.Add(1)
+				tasks <- downloadTask{tilesTypeO, 0, sel, isThumb, true, s}
 			}
 		}
 	}
@@ -107,6 +124,7 @@ const (
 	tilesTypeP tilesType = "p" // 筒
 	tilesTypeS tilesType = "s" // 索
 	tilesTypeZ tilesType = "z" // 字
+	tilesTypeO tilesType = "other"
 )
 
 const (
@@ -114,6 +132,7 @@ const (
 	baseURL     = "http://wiki.lingshangkaihua.com/mediawiki/index.php/File:"
 	extension   = ".png"
 	saveDir     = "images"
+	otherDir    = "other"
 	logPath     = "logs/tiles_downloader.log"
 	workers     = 4
 	domain      = "http://wiki.lingshangkaihua.com"
@@ -142,6 +161,10 @@ var (
 		tilesTypeZ: 1,
 	}
 
+	otherTiles = []string{
+		"B",
+	}
+
 	selectorsThumb = map[string]bool{
 		"#file > a > img": false,
 		"#mw-imagepage-section-filehistory > table > tbody > tr:nth-child(2) > td:nth-child(3) > a > img": true,
@@ -162,6 +185,10 @@ func getImgUrl(t tilesType, i int) (string, error) {
 		return nullStr, invalidTilesIndex
 	}
 	return fmt.Sprintf("%s%d%s%s", baseURL, i, t, extension), nil
+}
+
+func getOtherImgUrl(s string) (string, error) {
+	return fmt.Sprintf("%s%s%s", baseURL, s, extension), nil
 }
 
 func getImgDir(dir string) (string, error) {
@@ -187,6 +214,17 @@ func getImgName(t tilesType, i int, isThumb bool) (string, error) {
 		prefix = thumbPrefix
 	}
 	return fmt.Sprintf("%s%d%s%s", prefix, i, t, extension), nil
+}
+
+func getOtherImgName(s string, isThumb bool) (string, error) {
+
+	var prefix string
+
+	if isThumb {
+		prefix = thumbPrefix
+	}
+
+	return fmt.Sprintf("%s%s%s", prefix, s, extension), nil
 }
 
 func downloadImg(imgSrc string, dir string, name string) error {
@@ -271,6 +309,59 @@ func tilesDownloader(t tilesType, i int, selector string, dirName string, isThum
 	}
 
 	subDir := strings.Replace(filepath.Join(dir, t.String()), string(os.PathSeparator), "/", -1)
+
+	err = downloadImg(imgSrc, subDir, fileName)
+	if err != nil {
+		return errors.Wrap(err, "downloadImg")
+	}
+
+	logrus.Infof("Downloaded %s to %s/%s", imgSrc, subDir, fileName)
+
+	return nil
+}
+
+func otherTilesDownloader(s string, selector string, dirName string, isThumb bool) error {
+	url, err := getOtherImgUrl(s)
+	if err != nil {
+		return errors.Wrap(err, "getOtherImgUrl")
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return errors.Wrap(err, "http.Get")
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			logrus.Infoln(err, "Body.Close")
+		}
+	}(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.Errorf("status code %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "goquery.NewDocumentFromReader")
+	}
+
+	imgSrc, exists := doc.Find(selector).First().Attr("src")
+	if !exists {
+		return errors.Errorf("%s not found", selector)
+	}
+
+	fileName, err := getOtherImgName(s, isThumb)
+	if err != nil {
+		return errors.Wrap(err, "getImgName")
+	}
+
+	dir, err := getImgDir(dirName)
+	if err != nil {
+		return errors.Wrap(err, "getImgDir")
+	}
+
+	subDir := strings.Replace(filepath.Join(dir, otherDir), string(os.PathSeparator), "/", -1)
 
 	err = downloadImg(imgSrc, subDir, fileName)
 	if err != nil {
